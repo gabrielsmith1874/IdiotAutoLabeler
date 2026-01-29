@@ -80,8 +80,8 @@ TOGGLE_KEY_MAP = {
 
 class Config:
     MODEL_PATH = Path("models/enemy_segmentation.pth")  # Change to stdc1_segmentation.pth for STDC1-Seg
-    CAPTURE_SIZE = 256        # Capture region around cursor
-    INFERENCE_SIZE = 256      # Must match training size (model trained on 256x256)
+    CAPTURE_SIZE = 192        # Capture region around cursor
+    INFERENCE_SIZE = 192      # Must match training size (model trained on 256x256)
     THRESHOLD = 0.8          # Detection threshold
     TRIGGER_DEPTH_PERCENTAGE = 0.01  # Percentage of mask size for trigger depth (1%)
     LEAVE_BUFFER = 0.05        # Seconds to wait before releasing after leaving hitbox
@@ -307,6 +307,9 @@ class FastTrigger:
             self.center_x + self.half,
             self.center_y + self.half
         )
+        # Pre-compute capture region (cached when not following cursor)
+        self._cached_region = self.default_region if not Config.FOLLOW_CURSOR else None
+        self._point = ctypes.wintypes.POINT()  # Reuse POINT struct
 
         # DXCam
         self.camera = dxcam.create(output_color="RGB")
@@ -507,35 +510,35 @@ class FastTrigger:
         self.last_mouse5_state = True
     
     def get_capture_region(self) -> tuple:
-        """Get capture region - follows cursor if enabled, else screen center."""
-        if Config.FOLLOW_CURSOR:
-            # Get current cursor position
-            point = ctypes.wintypes.POINT()
-            ctypes.windll.user32.GetCursorPos(ctypes.byref(point))
-            cx, cy = point.x, point.y
+        """Get capture region - follows cursor if enabled, else returns cached default."""
+        if not Config.FOLLOW_CURSOR:
+            return self._cached_region
 
-            # Calculate region bounds
-            x1 = cx - self.half
-            y1 = cy - self.half
-            x2 = cx + self.half
-            y2 = cy + self.half
+        # Get current cursor position (reuse POINT struct)
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(self._point))
+        cx, cy = self._point.x, self._point.y
 
-            # Clamp to screen dimensions
-            x1 = max(0, min(x1, self.screen_w))
-            y1 = max(0, min(y1, self.screen_h))
-            x2 = max(0, min(x2, self.screen_w))
-            y2 = max(0, min(y2, self.screen_h))
+        # Calculate region bounds
+        x1 = cx - self.half
+        y1 = cy - self.half
+        x2 = cx + self.half
+        y2 = cy + self.half
 
-            # Validate region size. If invalid (offline/collapsed), fallback to default.
-            if (x2 - x1) <= 0 or (y2 - y1) <= 0:
-                return self.default_region
+        # Clamp to screen dimensions
+        x1 = max(0, min(x1, self.screen_w))
+        y1 = max(0, min(y1, self.screen_h))
+        x2 = max(0, min(x2, self.screen_w))
+        y2 = max(0, min(y2, self.screen_h))
 
-            return (x1, y1, x2, y2)
-        return self.default_region
+        # Validate region size
+        if (x2 - x1) <= 0 or (y2 - y1) <= 0:
+            return self._cached_region
+
+        return (x1, y1, x2, y2)
 
     def capture(self) -> np.ndarray:
-        """Capture screen region around cursor."""
-        region = self.get_capture_region()
+        """Capture screen region - uses cached region when not following cursor."""
+        region = self._cached_region if self._cached_region is not None else self.get_capture_region()
         frame = self.camera.grab(region=region)
         if frame is None:
             frame = self.camera.grab(region=region)
@@ -815,6 +818,11 @@ class FastTrigger:
                 self.check_toggle()
                 self.profiler.end()
 
+                # Check aimbot (always runs regardless of trigger state)
+                self.profiler.start("check_aimbot")
+                self.check_aimbot(mask)
+                self.profiler.end()
+
                 # Check trigger only when active
                 in_hitbox = False
                 if self.is_active():
@@ -824,10 +832,6 @@ class FastTrigger:
 
                     self.profiler.start("update_trigger_state")
                     self.update_trigger_state(in_hitbox)
-                    self.profiler.end()
-
-                    self.profiler.start("check_aimbot")
-                    self.check_aimbot(mask)
                     self.profiler.end()
                 else:
                     # Release click if deactivated while holding
