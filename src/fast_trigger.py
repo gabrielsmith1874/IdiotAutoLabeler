@@ -80,10 +80,10 @@ TOGGLE_KEY_MAP = {
 
 class Config:
     MODEL_PATH = Path("models/enemy_segmentation.pth")  # Change to stdc1_segmentation.pth for STDC1-Seg
-    CAPTURE_SIZE = 192        # Capture region around cursor
-    INFERENCE_SIZE = 192      # Must match training size (model trained on 256x256)
+    CAPTURE_SIZE = 256        # Capture region around cursor
+    INFERENCE_SIZE = 256      # Must match training size (model trained on 256x256)
     THRESHOLD = 0.8          # Detection threshold
-    TRIGGER_DEPTH_PERCENTAGE = 0.01  # Percentage of mask size for trigger depth (1%)
+    TRIGGER_DEPTH_PERCENTAGE = 0.05  # Percentage of mask size for trigger depth (1%)
     LEAVE_BUFFER = 0.05        # Seconds to wait before releasing after leaving hitbox
     FOLLOW_CURSOR = False     # Whether to capture around cursor or screen center
 
@@ -288,7 +288,7 @@ class Profiler:
 
 
 class FastTrigger:
-    def __init__(self, use_tensorrt: bool = True, use_compile: bool = True):
+    def __init__(self, use_tensorrt: bool = True, use_compile: bool = True, profiler: bool = False):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Screen info
@@ -325,6 +325,17 @@ class FastTrigger:
             self.mean = self.mean.half()
             self.std = self.std.half()
 
+        # Pre-allocate tensor buffers for inference (reuse instead of creating each frame)
+        self._input_buffer = torch.empty((1, 3, Config.INFERENCE_SIZE, Config.INFERENCE_SIZE), device=self.device, dtype=torch.float32)
+        self._input_buffer_np = np.empty((1, 3, Config.INFERENCE_SIZE, Config.INFERENCE_SIZE), dtype=np.float32)
+        self._output_buffer = torch.empty((1, 1, Config.CAPTURE_SIZE, Config.CAPTURE_SIZE), device=self.device, dtype=torch.float32)
+        if self.device.type == "cuda" and not self.is_tensorrt:
+            self._input_buffer = self._input_buffer.half()
+
+        # Pre-compute normalization constants for NumPy
+        self._mean_np = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        self._std_inv_np = 1.0 / np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
         # State
         self.active = False  # Toggle state (on/off)
         self.last_f3_state = False  # Track previous F3 state for toggle detection
@@ -340,7 +351,7 @@ class FastTrigger:
 
         # Profiler
         self.profiler = Profiler()
-        self.profiler_enabled = True
+        self.profiler_enabled = profiler
 
         # Warmup
         self._warmup()
@@ -388,7 +399,7 @@ class FastTrigger:
         """Check if trigger is active (toggle state)."""
         return self.active
     
-    def _find_target_centroid(self, mask: np.ndarray) -> tuple:
+    def _find_target_centroid(self, mask: np.ndarray, apply_offset: bool = True) -> tuple:
         """Find target centroid in mask using connected components.
 
         Returns (cy, cx) in mask coordinates, or None.
@@ -424,13 +435,13 @@ class FastTrigger:
             return None
 
         cx, cy = best  # centroid is (x, y)
-        
-        # Adjust to aim at upper portion (head area)
-        # Calculate offset from centroid based on component height
-        component_height = int(stats[best_idx, cv2.CC_STAT_HEIGHT])
-        head_offset = int(component_height * Config.HEADSHOT_OFFSET)
-        cy = cy - head_offset  # Move up from centroid
-        
+
+        # Only calculate head offset when aimbot is actively targeting
+        if apply_offset:
+            component_height = int(stats[best_idx, cv2.CC_STAT_HEIGHT])
+            head_offset = int(component_height * Config.HEADSHOT_OFFSET)
+            cy = cy - head_offset  # Move up from centroid
+
         return int(round(cy)), int(round(cx))
 
     def _mouse_move_relative(self, dx: int, dy: int):
@@ -457,7 +468,7 @@ class FastTrigger:
             return
         self.last_aimbot_time = now
 
-        target = self._find_target_centroid(mask)
+        target = self._find_target_centroid(mask, apply_offset=True)
         if target is None:
             if not self.last_mouse5_state:
                 print("Aimbot: No mask found")
@@ -549,14 +560,12 @@ class FastTrigger:
     @torch.no_grad()
     def infer(self, frame: np.ndarray) -> np.ndarray:
         """Run inference. Returns mask."""
-        # Normalize in NumPy first (works correctly with TensorRT)
-        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-        img_norm = frame.astype(np.float32) / 255.0
-        img_norm = (img_norm - mean) / std
+        # Normalize using pre-computed constants (avoids array allocation)
+        frame_float = frame.astype(np.float32) / 255.0
+        frame_float = (frame_float - self._mean_np) * self._std_inv_np
 
-        # Convert to tensor: HWC -> CHW -> NCHW
-        img = torch.from_numpy(img_norm).permute(2, 0, 1).unsqueeze(0).to(self.device, non_blocking=True)
+        # Convert to tensor
+        img = torch.from_numpy(frame_float.transpose(2, 0, 1)).to(self.device, non_blocking=True).unsqueeze(0)
 
         # Resize to model's expected input size
         if img.shape[2] != Config.INFERENCE_SIZE or img.shape[3] != Config.INFERENCE_SIZE:
@@ -965,6 +974,7 @@ def main():
     parser.add_argument("--detect-keys", "-d", action="store_true", help="Run key detection debug mode")
     parser.add_argument("--no-tensorrt", action="store_true", help="Disable TensorRT engine loading")
     parser.add_argument("--no-compile", action="store_true", help="Disable torch.compile optimization")
+    parser.add_argument("--profiler", action="store_true", help="Enable profiling output")
     args = parser.parse_args()
 
     if args.detect_keys:
@@ -991,7 +1001,7 @@ def main():
         print(f"ERROR: Model not found: {Config.MODEL_PATH}")
         return
 
-    trigger = FastTrigger(use_tensorrt=not args.no_tensorrt, use_compile=not args.no_compile)
+    trigger = FastTrigger(use_tensorrt=not args.no_tensorrt, use_compile=not args.no_compile, profiler=args.profiler)
 
     if args.preview:
         trigger.run_with_preview()
