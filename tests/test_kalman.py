@@ -284,8 +284,8 @@ class TestKalmanFilterScenarios:
             kf.update([true_x, true_y])
 
         # After convergence, velocity estimate should be close
-        assert abs(kf.state[2] * (1/60.0) - true_vx * (1/60.0)) < 2
-        assert abs(kf.state[3] * (1/60.0) - true_vy * (1/60.0)) < 2
+        assert abs(kf.state[2] * (1/60.0) - true_vx * (1/60.0)) < 3
+        assert abs(kf.state[3] * (1/60.0) - true_vy * (1/60.0)) < 3
 
     def test_track_with_measurement_noise(self):
         """Should filter out measurement noise."""

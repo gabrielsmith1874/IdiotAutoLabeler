@@ -65,6 +65,13 @@ MOUSEEVENTF_LEFTUP = 0x0004
 VK_XBUTTON1 = 0x05  # Mouse4
 VK_XBUTTON2 = 0x06  # Mouse5
 VK_F3 = 0x72  # F3 key
+VK_CAPITAL = 0x14  # Capslock
+
+# Toggle key mapping
+TOGGLE_KEY_MAP = {
+    "capslock": VK_CAPITAL,
+    "f3": VK_F3,
+}
 
 
 # =============================================================================
@@ -84,8 +91,10 @@ class Config:
 
     AIMBOT_ENABLED = True
     AIMBOT_GAIN = 0.45
-    AIMBOT_MAX_STEP = 35
+    AIMBOT_MAX_STEP = 15
     AIMBOT_MIN_AREA = 30
+    HEADSHOT_OFFSET = 0.37  # Percentage of component height to offset upward for headshots (20%)
+    TOGGLE_KEY = "capslock"  # Toggle key: "capslock", "f3", or any key name
 
 
 # =============================================================================
@@ -318,7 +327,10 @@ class FastTrigger:
         self.last_f3_state = False  # Track previous F3 state for toggle detection
         self.last_mouse5_state = False  # Track previous Mouse5 state for aimbot
         self.last_aimbot_time = 0  # Last time aimbot was run (for throttling)
-        self.holding_click = False  # Whether currently holding click
+        self.holding_click = False  # Whether click is being held
+        self.we_clicked = False  # Whether WE sent the mouse down
+        self.user_clicked_first = False  # Whether user was clicking before we synced
+        self.click_cooldown = 0  # Cooldown before we can sync after user release
         self.left_hitbox_time = 0  # Timestamp when left hitbox
         self.trigger_count = 0
         self.running = True
@@ -359,14 +371,15 @@ class FastTrigger:
             self.camera.grab(region=self.default_region)
     
     def check_toggle(self):
-        """Check if F3 was pressed and toggle active state."""
-        f3_current = ctypes.windll.user32.GetAsyncKeyState(VK_F3) & 0x8000 != 0
-        
-        # Detect rising edge for F3 (was False, now True)
-        if f3_current and not self.last_f3_state:
+        """Check if toggle key was pressed and toggle active state."""
+        toggle_key = TOGGLE_KEY_MAP.get(Config.TOGGLE_KEY.lower(), VK_F3)
+        toggle_current = ctypes.windll.user32.GetAsyncKeyState(toggle_key) & 0x8000 != 0
+
+        # Detect rising edge (was False, now True)
+        if toggle_current and not self.last_f3_state:
             self.active = not self.active
-            print(f"Toggle: {'ON' if self.active else 'OFF'}")
-        self.last_f3_state = f3_current
+            print(f"Toggle: {'ON' if self.active else 'OFF'} (Key: {Config.TOGGLE_KEY})")
+        self.last_f3_state = toggle_current
     
     def is_active(self) -> bool:
         """Check if trigger is active (toggle state)."""
@@ -409,12 +422,11 @@ class FastTrigger:
 
         cx, cy = best  # centroid is (x, y)
         
-        # Adjust to aim at upper 80% (head area)
-        # Shift centroid upward by 20% of the component height
-        min_y = int(stats[best_idx, cv2.CC_STAT_TOP])
+        # Adjust to aim at upper portion (head area)
+        # Calculate offset from centroid based on component height
         component_height = int(stats[best_idx, cv2.CC_STAT_HEIGHT])
-        head_offset = int(component_height * 0.2)  # 20% up
-        cy = max(int(cy - head_offset), min_y + head_offset // 2)  # Don't go above component
+        head_offset = int(component_height * Config.HEADSHOT_OFFSET)
+        cy = cy - head_offset  # Move up from centroid
         
         return int(round(cy)), int(round(cx))
 
@@ -451,11 +463,20 @@ class FastTrigger:
 
         ty, tx = target
         h, w = mask.shape
-        cy, cx = h // 2, w // 2
 
-        # Calculate distance from center
-        dist = np.sqrt((tx - cx) ** 2 + (ty - cy) ** 2)
-        
+        # Convert local mask coordinates to absolute screen coordinates
+        region = self.get_capture_region()
+        region_x1, region_y1 = region[0], region[1]
+        target_screen_x = region_x1 + tx
+        target_screen_y = region_y1 + ty
+
+        # Calculate actual screen center
+        screen_center_x = self.screen_w // 2
+        screen_center_y = self.screen_h // 2
+
+        # Calculate distance from actual screen center
+        dist = np.sqrt((target_screen_x - screen_center_x) ** 2 + (target_screen_y - screen_center_y) ** 2)
+
         # Calculate deadzone based on mask size (same as trigger depth)
         rows, cols = np.where(mask > (Config.THRESHOLD * 255))
         if len(rows) > 0:
@@ -467,13 +488,13 @@ class FastTrigger:
             deadzone = max(1, int(mask_size * Config.TRIGGER_DEPTH_PERCENTAGE))
         else:
             deadzone = 1
-        
+
         # Don't move if target is within deadzone (already in triggerable region)
         if dist < deadzone:
             return
 
-        err_x = (tx - cx)
-        err_y = (ty - cy)
+        err_x = target_screen_x - screen_center_x
+        err_y = target_screen_y - screen_center_y
 
         dx = int(round(err_x * Config.AIMBOT_GAIN))
         dy = int(round(err_y * Config.AIMBOT_GAIN))
@@ -593,30 +614,58 @@ class FastTrigger:
     
     def update_trigger_state(self, in_hitbox: bool):
         """Update trigger state based on whether center is in hitbox.
-        
-        Holds click until center leaves hitbox, with buffer for re-entry.
+
+        Only manages clicks that WE send. If user is clicking manually, we don't interfere.
         """
         now = time.perf_counter()
-        
+
+        # Check if user is physically holding left mouse button
+        user_holding = ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000 != 0
+
+        # Update cooldown
+        if self.click_cooldown > 0:
+            self.click_cooldown -= 1
+
         if in_hitbox:
-            # Center is in hitbox
+            # In hitbox - we should be clicking
             if not self.holding_click:
-                # Start holding click
-                self._mouse_down()
-                self.holding_click = True
-                self.trigger_count += 1
-            # Reset leave time since we're back in hitbox
+                # Not holding - decide who clicks
+                if not user_holding and self.click_cooldown == 0:
+                    # User not clicking and cooldown over - we click
+                    self._mouse_down()
+                    self.holding_click = True
+                    self.we_clicked = True
+                    self.user_clicked_first = False
+                    self.trigger_count += 1
+                elif user_holding:
+                    # User clicking - sync state
+                    self.holding_click = True
+                    self.we_clicked = False
+                    self.user_clicked_first = True
+            elif not user_holding and self.user_clicked_first:
+                # User released their click - set cooldown
+                self.holding_click = False
+                self.user_clicked_first = False
+                self.click_cooldown = 10
             self.left_hitbox_time = 0
         else:
-            # Center is not in hitbox
+            # Not in hitbox
             if self.holding_click:
-                if self.left_hitbox_time == 0:
-                    # First time leaving, record timestamp
-                    self.left_hitbox_time = now
-                elif (now - self.left_hitbox_time) > Config.LEAVE_BUFFER:
-                    # Been out of hitbox for buffer time, release click
-                    self._mouse_up()
+                # If WE clicked, release after buffer
+                if self.we_clicked:
+                    if self.left_hitbox_time == 0:
+                        self.left_hitbox_time = now
+                    elif (now - self.left_hitbox_time) > Config.LEAVE_BUFFER:
+                        self._mouse_up()
+                        self.holding_click = False
+                        self.we_clicked = False
+                        self.user_clicked_first = False
+                        self.click_cooldown = 10  # Cooldown to prevent immediate re-clicking
+                        self.left_hitbox_time = 0
+                else:
+                    # User was clicking - just reset (don't release, user handles it)
                     self.holding_click = False
+                    self.user_clicked_first = False
                     self.left_hitbox_time = 0
     
     def _mouse_down(self):
