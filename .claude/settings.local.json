@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la \"e:\\\\Codebase\\\\IdiotAutoLabeler\\\\data\"\" 2>/dev/null || echo \"Data directory listing \")",
+      "Bash(e:\\\\Codebase\\\\IdiotAutoLabeler\\\\.venv\\\\Scripts\\\\python.exe:*)",
+      "Bash(pip install:*)",
+      "Bash(pip index:*)",
+      "Bash(python:*)",
+      "Bash(findstr:*)",
+      "Bash(pip show:*)",
+      "Bash(dir:*)",
+      "Bash(where:*)",
+      "Bash(py:*)",
+      "Bash(.venvScriptspython.exe --version)",
+      "Bash(\".venv/Scripts/pip.exe\" install torch torchvision --index-url https://download.pytorch.org/whl/cu126)",
+      "Bash(\".venv/Scripts/pip.exe\" install tensorrt==10.7.0 --extra-index-url https://pypi.nvidia.com)",
+      "Bash(\".venv/Scripts/pip.exe\" install opencv-python dxcam timm)",
+      "Bash(\".venv/Scripts/pip.exe\" install opencv-python dxcam timm tensorrt==10.7.0 --extra-index-url https://pypi.nvidia.com)",
+      "Bash(\".venv/Scripts/pip.exe\" install albumentations)",
+      "Bash(\".venv/Scripts/pip.exe\" install onnx onnxscript)",
+      "Bash(set PYTHONIOENCODING=utf-8)",
+      "Bash(\".venv/Scripts/pip.exe\" uninstall opencv-python-headless -y)",
+      "Bash(\".venv/Scripts/pip.exe\" install opencv-python)",
+      "Bash(\".venv/Scripts/pip.exe\" install --force-reinstall opencv-python)"
+    ]
+  }
+}
