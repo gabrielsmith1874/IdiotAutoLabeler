@@ -21,7 +21,12 @@
       "Bash(set PYTHONIOENCODING=utf-8)",
       "Bash(\".venv/Scripts/pip.exe\" uninstall opencv-python-headless -y)",
       "Bash(\".venv/Scripts/pip.exe\" install opencv-python)",
-      "Bash(\".venv/Scripts/pip.exe\" install --force-reinstall opencv-python)"
+      "Bash(\".venv/Scripts/pip.exe\" install --force-reinstall opencv-python)",
+      "Bash(.venvScriptspip install pytest pytest-cov scipy)",
+      "Bash(.venv/Scripts/pip install:*)",
+      "Bash(.venv/Scripts/python -m pytest:*)",
+      "Bash(find:*)",
+      "Bash(e:)"
     ]
   }
 }
