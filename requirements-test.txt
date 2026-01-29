@@ -1,0 +1,17 @@
+# Test dependencies for IdiotAutoLabeler
+
+# Testing framework
+pytest>=7.0.0
+pytest-cov>=4.0.0
+
+# For mocking
+pytest-mock>=3.10.0
+
+# For image processing tests
+scipy>=1.10.0
+
+# Already required by main project but listed for completeness:
+# numpy
+# torch
+# Pillow
+# opencv-python
