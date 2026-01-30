@@ -79,9 +79,9 @@ TOGGLE_KEY_MAP = {
 # =============================================================================
 
 class Config:
-    MODEL_PATH = Path("models/stdc1_segmentation.pth")
-    CAPTURE_SIZE = 192        # Capture region around cursor
-    INFERENCE_SIZE = 192      # Must match training size
+    MODEL_PATH = Path("models/enemy_segmentation.pth")  # Change to stdc1_segmentation.pth for STDC1-Seg
+    CAPTURE_SIZE = 256        # Capture region around cursor
+    INFERENCE_SIZE = 256      # Must match training size (model trained on 256x256)
     THRESHOLD = 0.8          # Detection threshold
     TRIGGER_DEPTH_PERCENTAGE = 0.05  # Percentage of mask size for trigger depth (1%)
     LEAVE_BUFFER = 0.05        # Seconds to wait before releasing after leaving hitbox
@@ -311,9 +311,8 @@ class FastTrigger:
         self._cached_region = self.default_region if not Config.FOLLOW_CURSOR else None
         self._point = ctypes.wintypes.POINT()  # Reuse POINT struct
 
-        # DXCam - use video mode for lower latency
-        self.camera = dxcam.create(output_color="RGB")
-        self.camera.start(region=self.default_region, target_fps=0)
+        # DXCam
+        self.camera = dxcam.create(output_color="RGB", target_fps=0)
 
         # Load model (TensorRT, compiled PyTorch, or standard PyTorch)
         self.model, self.backend = load_model(self.device, use_tensorrt=use_tensorrt, use_compile=use_compile)
@@ -383,7 +382,7 @@ class FastTrigger:
 
         # Warmup capture
         for _ in range(3):
-            self.camera.get_latest_frame()
+            self.camera.grab(region=self.default_region)
     
     def check_toggle(self):
         """Check if toggle key was pressed and toggle active state."""
@@ -549,8 +548,11 @@ class FastTrigger:
         return (x1, y1, x2, y2)
 
     def capture(self) -> np.ndarray:
-        """Capture screen region - uses video mode for lowest latency."""
-        frame = self.camera.get_latest_frame()
+        """Capture screen region - uses cached region when not following cursor."""
+        region = self._cached_region if self._cached_region is not None else self.get_capture_region()
+        frame = self.camera.grab(region=region)
+        if frame is None:
+            frame = self.camera.grab(region=region)
         if frame is None:
             return np.zeros((Config.CAPTURE_SIZE, Config.CAPTURE_SIZE, 3), dtype=np.uint8)
         return frame
@@ -917,7 +919,6 @@ class FastTrigger:
     
     def cleanup(self):
         """Clean up resources."""
-        self.camera.stop()
         del self.camera
         print(f"Total triggers: {self.trigger_count}")
 
